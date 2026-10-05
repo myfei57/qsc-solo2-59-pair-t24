@@ -56,3 +56,24 @@ class NamespaceRegistry:
         """已登记设备数量。"""
 
         return len(self._entries)
+
+    def duplicate_addresses(self, entries: list[dict] | None = None) -> list[dict]:
+        """检查一批设备登记项里的全站地址重复；缺省检查当前登记表。"""
+
+        candidates = entries if entries is not None else self.addresses()
+        seen: dict[str, dict] = {}
+        duplicates: list[dict] = []
+        for entry in candidates:
+            address = str(entry.get("address", ""))
+            previous = seen.get(address)
+            if previous is not None:
+                duplicates.append(
+                    {
+                        "address": address,
+                        "first_kind": previous.get("kind", ""),
+                        "duplicate_kind": entry.get("kind", ""),
+                    }
+                )
+            else:
+                seen[address] = entry
+        return duplicates

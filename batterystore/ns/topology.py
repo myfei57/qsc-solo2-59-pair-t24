@@ -57,6 +57,35 @@ class Topology:
                     missing.append(need)
         return {"ready": sorted(present), "missing": sorted(missing), "ok": not missing}
 
+    def verify_startup(self, ready: set[str]) -> dict:
+        """启动自检：联控链每个步骤和它的全部前置条件都必须到位。"""
+
+        present = set(ready)
+        missing_stages: list[str] = []
+        missing_prerequisites: list[dict] = []
+        blocked: list[str] = []
+        for name, _detail, needs in self._stages:
+            if name not in present and name not in missing_stages:
+                missing_stages.append(name)
+            for need in needs:
+                if need not in present:
+                    blocked.append(name)
+                    if need not in missing_stages:
+                        missing_stages.append(need)
+                    item = {"stage": name, "requires": need}
+                    if item not in missing_prerequisites:
+                        missing_prerequisites.append(item)
+        missing = sorted(set(missing_stages) | {item["requires"] for item in missing_prerequisites})
+        return {
+            "ready": sorted(present),
+            "missing": missing,
+            "missing_stages": sorted(missing_stages),
+            "missing_prerequisites": missing_prerequisites,
+            "blocked_stages": sorted(set(blocked)),
+            "stages": self.describe(),
+            "ok": not missing,
+        }
+
     def stages_after(self, stage: str) -> list[str]:
         """返回某步骤之后的步骤名，供控制台高亮未完成的链路。"""
 

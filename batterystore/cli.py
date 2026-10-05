@@ -8,6 +8,7 @@
 ``status``   打印当前状态快照；
 ``config``   打印生效配置；
 ``alerts``   打印按最新编号路由后的告警；
+``startup-check`` 执行但不进入运行态，打印设备地址、联控链与容量自检报告；
 ``reset``    清掉落盘的平台计数。
 """
 
@@ -24,7 +25,14 @@ from .config import config_to_mapping, default_config, load_config
 from .console.server import ConsoleServer, probe_endpoints
 from .errors import StoreError
 
-DEFAULT_PROBE_PATHS = ("/api/status", "/api/readiness", "/api/topology", "/api/audit", "/api/racks")
+DEFAULT_PROBE_PATHS = (
+    "/api/status",
+    "/api/readiness",
+    "/api/topology",
+    "/api/audit",
+    "/api/startup-checks",
+    "/api/racks",
+)
 
 
 def _build(args: argparse.Namespace) -> Platform:
@@ -146,6 +154,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     payload = platform.status()
     payload["topology"] = platform.topology_summary()
     payload["capacity"] = platform.capacity().as_dict()
+    payload["startup_checks"] = platform.startup_self_checks(limit=5)
     payload["quota"] = platform.quota_snapshot()
     payload["trend"] = platform.trend_snapshot()
     _dump(payload)
@@ -169,6 +178,13 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     platform = _build(args)
     _dump(platform.reset_state())
     return 0
+
+
+def _cmd_startup_check(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    report = platform.startup_self_check()
+    _dump(report)
+    return 0 if report["ok"] else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -209,6 +225,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     alerts = sub.add_parser("alerts", help="打印路由后的告警", parents=[common])
     alerts.set_defaults(func=_cmd_alerts)
+
+    startup_check = sub.add_parser("startup-check", help="执行启动自检但不进入运行态", parents=[common])
+    startup_check.set_defaults(func=_cmd_startup_check)
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)

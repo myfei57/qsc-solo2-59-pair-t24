@@ -49,3 +49,14 @@ class ConfigError(StoreError):
 
 class NamespaceError(StoreError):
     """命名空间重复注册或解析失败。"""
+
+
+class StartupSelfCheckError(StoreError):
+    """启动自检未通过，平台不得进入运行态。"""
+
+    def __init__(self, message: str, *, component: str = "startup", report: dict | None = None) -> None:
+        super().__init__(message, component=component)
+        self.report = report or {}
+
+    def as_record(self) -> dict:
+        return {**super().as_record(), "report": self.report}

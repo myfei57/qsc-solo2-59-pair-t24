@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from batterystore.cli import build_parser, main
+from batterystore.errors import StartupSelfCheckError
 
 
 def test_cli_parser_exposes_subcommands():
     parser = build_parser()
     names = set(parser._subparsers._group_actions[0].choices)  # noqa: SLF001 - 解析器自检
-    assert {"serve", "demo", "status", "config", "alerts", "reset"} <= names
+    assert {"serve", "demo", "status", "config", "alerts", "startup-check", "reset"} <= names
 
 
 def test_cli_config_and_status(capsys, tmp_path):
@@ -19,6 +22,8 @@ def test_cli_config_and_status(capsys, tmp_path):
     assert "station1" in capsys.readouterr().out
     assert main(["--storage-root", storage, "alerts"]) == 0
     assert "alerts" in capsys.readouterr().out
+    assert main(["--storage-root", storage, "startup-check"]) == 0
+    assert "policy" in capsys.readouterr().out
     assert main(["--storage-root", storage, "reset"]) == 0
 
 
@@ -62,3 +67,21 @@ def test_store_summary_and_config_export(platform):
     assert platform.topology_summary()["zone_racks"]
     assert platform.rack_snapshot("rk-01")["rack_id"] == "rk-01"
     assert len(platform.rack_snapshots()) == 2
+
+
+def test_start_persists_structured_self_check_and_rejects_missing_prerequisite(platform):
+    startup = platform.start()
+    assert startup["self_check"]["ok"]
+    stored = platform.startup_self_checks()
+    assert stored[0]["check_id"] == startup["self_check"]["check_id"]
+    assert stored[0]["checks"]["capacity"]["planned"]["trace"]["cell_nominal_v"]
+    assert platform.store.exists("platform_state") is False
+    assert platform.audit.query(action="started", limit=10)
+
+    with pytest.raises(StartupSelfCheckError) as excinfo:
+        platform.start(ready_stages=set(platform.topology.order()) - {"bms"})
+    report = excinfo.value.report
+    assert report["decision"] == "reject_start"
+    assert any(failure["code"] == "missing_prerequisite" for failure in report["failures"])
+    assert platform.startup_self_checks(limit=1)[0]["check_id"] == report["check_id"]
+    assert platform.audit.query(action="self_check_rejected", limit=10)

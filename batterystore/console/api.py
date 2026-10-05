@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from ..audit.timeline import build_timeline
-from ..errors import StoreError
+from ..errors import StartupSelfCheckError, StoreError
 from ..store.index import summarize_documents
 from .pages import PageLibrary
 from .router import Router
@@ -56,6 +56,7 @@ class Api:
         add("GET", "/api/namespaces", lambda params, body: {"devices": self._platform.namespaces_describe()})
         add("GET", "/api/namespace/{address}", lambda params, body: self._platform.namespace(str(params.get("address", ""))))
         add("GET", "/api/capacity", lambda params, body: self._platform.capacity().as_dict())
+        add("GET", "/api/startup-checks", self._startup_checks)
         add("GET", "/api/racks", lambda params, body: {"racks": self._platform.rack_snapshots()})
         add("GET", "/api/rack/{rack_id}", lambda params, body: self._platform.rack_snapshot(str(params.get("rack_id", ""))))
         add("GET", "/api/mapping", lambda params, body: self._platform.rack_mapping())
@@ -119,7 +120,10 @@ class Api:
         except StoreError as error:
             # 控制台拒绝的动作也要留痕，便于巡检区分"谁触发了哪条联锁"。
             self._platform.note_error(error)
-            return 409, {"error": type(error).__name__, **error.as_record()}
+            record = error.as_record()
+            if isinstance(error, StartupSelfCheckError):
+                record["self_check"] = error.report
+            return 409, {"error": type(error).__name__, **record}
         return 200, payload
 
     def _audit(self, params: dict, body: dict) -> dict:
@@ -134,6 +138,9 @@ class Api:
 
     def _operations(self, params: dict, body: dict) -> dict:
         return {"operations": self._platform.audit.operations(limit=int(params.get("limit", 20)))}
+
+    def _startup_checks(self, params: dict, body: dict) -> dict:
+        return {"checks": self._platform.startup_self_checks(limit=int(params.get("limit", 20)))}
 
     def _events(self, params: dict, body: dict) -> dict:
         topic = params.get("topic")

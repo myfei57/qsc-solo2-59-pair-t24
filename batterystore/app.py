@@ -16,7 +16,7 @@ from .balance.balance import Balancer
 from .bms.bms import Bms
 from .clock import Clock, SystemClock
 from .config import StationConfig, config_to_mapping, default_config
-from .errors import StoreError
+from .errors import StartupSelfCheckError, StoreError
 from .eventbus import Event, EventBus
 from .fire.fire import FireLinkage
 from .grid.grid import GridTie
@@ -34,6 +34,7 @@ from .rack.mapping import RackMapping
 from .rack.pack import Pack
 from .rack.rack import Rack
 from .soc.soc import SocEstimator
+from .startup import REJECT_POLICY, run_startup_self_check
 from .store.journal import JsonlJournal
 from .store.jsonfile import JsonStore
 from .temp.temp import TempControl
@@ -48,9 +49,11 @@ DEFAULT_ZONE = "Z1"
 def build_rack(rack_id: str, label: str, zone: str, config: StationConfig, packs: int = 8) -> Rack:
     """按配置造一簇电池：每包若干单体，电压初始等于当前额定值。"""
 
-    per_pack = max(1, config.rack.cell_count // packs)
+    per_pack = max(1, (config.rack.cell_count + packs - 1) // packs)
     built: list[Pack] = []
+    cells_remaining = config.rack.cell_count
     for pack_index in range(packs):
+        pack_cells = min(per_pack, cells_remaining)
         cells = [
             Cell(
                 cell_id=f"{rack_id}-p{pack_index + 1}c{cell_index + 1}",
@@ -59,8 +62,9 @@ def build_rack(rack_id: str, label: str, zone: str, config: StationConfig, packs
                 voltage_v=config.rack.cell_nominal_v,
                 soc_pct=config.soc.initial_soc_pct,
             )
-            for cell_index in range(per_pack)
+            for cell_index in range(pack_cells)
         ]
+        cells_remaining -= pack_cells
         built.append(Pack(f"{rack_id}-p{pack_index + 1}", cells))
     rack = Rack(rack_id, built, zone)
     rack.set_soc(config.soc.initial_soc_pct)
@@ -85,6 +89,7 @@ class Platform:
         store = JsonStore(self.config.storage_root)
         self.store = store
         self.audit = AuditLog(self.clock, self.bus, JsonlJournal(store.root, "audit", segment_limit=512))
+        self.startup_journal = JsonlJournal(store.root, "startup_self_check", segment_limit=128)
         self.namespaces = NamespaceRegistry(station)
         self.topology: Topology = build_default_topology()
         self.trend = TrendBuffer(period_s=5.0)
@@ -241,22 +246,78 @@ class Platform:
         )
         return payload
 
-    def start(self) -> dict:
-        """启动平台：核对拓扑与命名空间。"""
+    def startup_self_check(self, ready_stages: set[str] | list[str] | None = None, policy: str = REJECT_POLICY) -> dict:
+        """执行启动自检并把完整结构化结果持久化。"""
+
+        check_id = self.ids.next()
+        report = run_startup_self_check(
+            station=self.station,
+            check_id=check_id,
+            ts=self.clock.now(),
+            now_iso=self.clock.utc_iso(),
+            config=self.config,
+            registry=self.namespaces,
+            topology=self.topology,
+            racks=self.racks,
+            ready_stages=ready_stages,
+            policy=policy,
+        )
+        self.startup_journal.append(report)
+        return report
+
+    def startup_self_checks(self, limit: int = 20) -> list[dict]:
+        """返回最近的启动自检报告（最新的在前），供事后复核。"""
+
+        return list(reversed(self.startup_journal.read_all()[-limit:]))
+
+    def start(self, ready_stages: set[str] | list[str] | None = None, policy: str = REJECT_POLICY) -> dict:
+        """启动平台：先做设备地址、联控链和容量配置自检。"""
 
         with self._lock:
+            report = self.startup_self_check(ready_stages=ready_stages, policy=policy)
+            if not report["ok"]:
+                was_running = self._running
+                self._running = False
+                self.bus.publish(
+                    Event.of(
+                        "station",
+                        "startup",
+                        "self_check_rejected",
+                        station=self.station,
+                        severity="alarm",
+                        message="启动自检未通过，拒绝进入运行态",
+                        check_id=report["check_id"],
+                        failure_codes=[failure["code"] for failure in report["failures"]],
+                        failure_count=report["failure_count"],
+                        previously_running=was_running,
+                        report_path=self.startup_journal.segments()[-1] if self.startup_journal.segments() else "",
+                    )
+                )
+                raise StartupSelfCheckError(
+                    "启动自检未通过，已拒绝启动",
+                    report=report,
+                )
+
             self._running = True
             self.bms.online()
-            ready = {name: True for name in self.topology.order()}
-            topology = self.topology.verify(set(ready))
-            self.bus.publish(Event.of("station", "station", "started", severity="notice", unit=self.station))
+            self.bus.publish(
+                Event.of(
+                    "station",
+                    "station",
+                    "started",
+                    severity="notice",
+                    unit=self.station,
+                    check_id=report["check_id"],
+                )
+            )
             return {
                 "running": self._running,
                 "station": self.station,
                 "now_iso": self.clock.utc_iso(),
+                "self_check": report,
                 "topology_order": self.topology.order(),
                 "namespaces": self.namespaces.count(),
-                "pending_stages": topology["missing"],
+                "pending_stages": report["checks"]["topology"]["missing"],
             }
 
     def stop(self) -> dict:
@@ -777,6 +838,7 @@ class Platform:
             "capacity": self.capacity().as_dict(),
             "quota": self.quota_snapshot(),
             "audit": self.audit_snapshot(),
+            "startup_checks": self.startup_self_checks(limit=5),
             "mapping": self.rack_mapping(),
             "config": config_to_mapping(self.config),
         }
