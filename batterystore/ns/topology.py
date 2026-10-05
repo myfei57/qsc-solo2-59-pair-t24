@@ -57,6 +57,38 @@ class Topology:
                     missing.append(need)
         return {"ready": sorted(present), "missing": sorted(missing), "ok": not missing}
 
+    def check(self, ready: set[str]) -> dict:
+        """逐步骤核对前置条件，把每一步的就绪状态与缺失明细都列出来。
+
+        与 :meth:`verify` 只汇总缺失前置不同，这里把"步骤自身未就绪"也单列，
+        启动自检据此判定链路是否完整接上，而不是只看缺失名字的汇总。
+        """
+
+        present = set(ready)
+        stages: list[dict] = []
+        missing: list[str] = []
+        for name, detail, needs in self._stages:
+            stage_missing = [need for need in needs if need not in present]
+            stages.append(
+                {
+                    "stage": name,
+                    "detail": detail,
+                    "ready": name in present,
+                    "requires": list(needs),
+                    "missing": stage_missing,
+                }
+            )
+            for need in stage_missing:
+                if need not in missing:
+                    missing.append(need)
+        not_ready = [stage["stage"] for stage in stages if not stage["ready"]]
+        return {
+            "ok": not missing and not not_ready,
+            "stages": stages,
+            "missing": sorted(missing),
+            "not_ready": not_ready,
+        }
+
     def stages_after(self, stage: str) -> list[str]:
         """返回某步骤之后的步骤名，供控制台高亮未完成的链路。"""
 

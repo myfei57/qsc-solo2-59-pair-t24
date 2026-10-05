@@ -126,6 +126,8 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     _dump(report)
 
     failures = [name for name, item in endpoints.items() if not item["ok"]]
+    if not startup.get("running"):
+        failures.append("startup_refused")
     failures.extend(name for name, item in (("grid_tie", tie), ("charge", charging), ("discharge", discharging)) if not item["ok"])
     if not drill["ok"]:
         failures.append("fire_drill")
@@ -146,6 +148,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     payload = platform.status()
     payload["topology"] = platform.topology_summary()
     payload["capacity"] = platform.capacity().as_dict()
+    payload["selfcheck"] = platform.selfcheck_report()
     payload["quota"] = platform.quota_snapshot()
     payload["trend"] = platform.trend_snapshot()
     _dump(payload)

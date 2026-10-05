@@ -4,6 +4,16 @@ from __future__ import annotations
 
 from .capacity import CapacityPlan, plan_capacity
 from .registry import NamespaceRegistry
+from .selfcheck import Finding, StartupSelfCheck, run_startup_selfcheck
 from .topology import Topology, build_default_topology
 
-__all__ = ["CapacityPlan", "NamespaceRegistry", "Topology", "build_default_topology", "plan_capacity"]
+__all__ = [
+    "CapacityPlan",
+    "Finding",
+    "NamespaceRegistry",
+    "StartupSelfCheck",
+    "Topology",
+    "build_default_topology",
+    "plan_capacity",
+    "run_startup_selfcheck",
+]

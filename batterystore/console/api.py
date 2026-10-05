@@ -56,6 +56,7 @@ class Api:
         add("GET", "/api/namespaces", lambda params, body: {"devices": self._platform.namespaces_describe()})
         add("GET", "/api/namespace/{address}", lambda params, body: self._platform.namespace(str(params.get("address", ""))))
         add("GET", "/api/capacity", lambda params, body: self._platform.capacity().as_dict())
+        add("GET", "/api/selfcheck", lambda params, body: self._platform.selfcheck_report())
         add("GET", "/api/racks", lambda params, body: {"racks": self._platform.rack_snapshots()})
         add("GET", "/api/rack/{rack_id}", lambda params, body: self._platform.rack_snapshot(str(params.get("rack_id", ""))))
         add("GET", "/api/mapping", lambda params, body: self._platform.rack_mapping())

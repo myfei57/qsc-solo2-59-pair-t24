@@ -23,6 +23,7 @@ from .grid.grid import GridTie
 from .ids import IdFactory
 from .ns.capacity import CapacityPlan, plan_capacity
 from .ns.registry import NamespaceRegistry
+from .ns.selfcheck import StartupSelfCheck, run_startup_selfcheck
 from .ns.topology import Topology, build_default_topology
 from .ops.charge import charge_rack
 from .ops.discharge import discharge_rack
@@ -76,6 +77,7 @@ class Platform:
         clock: Clock | None = None,
         station: str = DEFAULT_STATION,
         rack_count: int = 2,
+        topology: Topology | None = None,
     ) -> None:
         self.config = config or default_config()
         self.clock = clock or SystemClock()
@@ -86,13 +88,14 @@ class Platform:
         self.store = store
         self.audit = AuditLog(self.clock, self.bus, JsonlJournal(store.root, "audit", segment_limit=512))
         self.namespaces = NamespaceRegistry(station)
-        self.topology: Topology = build_default_topology()
+        self.topology: Topology = topology or build_default_topology()
         self.trend = TrendBuffer(period_s=5.0)
         self.ids = IdFactory("op")
         self.mapping = RackMapping()
 
+        self._declared_rack_count = max(1, rack_count)
         self.racks: dict[str, Rack] = {}
-        for index in range(max(1, rack_count)):
+        for index in range(self._declared_rack_count):
             rack_id = f"rk-{index + 1:02d}"
             zone = f"Z{(index % self.config.fire.zone_count) + 1}"
             self.racks[rack_id] = build_rack(rack_id, f"R{index + 1}", zone, self.config)
@@ -112,6 +115,7 @@ class Platform:
         self._faults_reported = 0
         self._drills = 0
         self._last_audit_ts = 0.0
+        self._last_selfcheck: StartupSelfCheck | None = None
         self._running = False
         self._lock = threading.RLock()
         self._register_namespaces()
@@ -242,22 +246,89 @@ class Platform:
         return payload
 
     def start(self) -> dict:
-        """启动平台：核对拓扑与命名空间。"""
+        """启动平台：先跑启动自检，缺前置条件一律拒绝启动。
+
+        自检报告整份落盘（``startup_selfcheck``）并写一条审计事件，事后可以
+        通过 :meth:`selfcheck_report` 或控制台复核，而不是只留下一行日志。
+        """
 
         with self._lock:
+            report = run_startup_selfcheck(
+                station=self.station,
+                topology=self.topology,
+                namespaces=self.namespaces,
+                config=self.config,
+                racks=self.racks,
+                declared_rack_count=self._declared_rack_count,
+                checked_at=self.clock.utc_iso(),
+            )
+            self._last_selfcheck = report
+            payload = report.as_dict()
+            self.store.write("startup_selfcheck", payload)
+            blocking = report.findings_of("blocking")
+            warnings = report.findings_of("warning")
+            if blocking:
+                severity, message = "alarm", "启动自检未通过，拒绝启动"
+            elif warnings:
+                severity, message = "warning", "启动自检通过（带容量告警）"
+            else:
+                severity, message = "notice", "启动自检通过"
+            self.bus.publish(
+                Event.of(
+                    "station",
+                    "selfcheck",
+                    "startup_selfcheck",
+                    station=self.station,
+                    severity=severity,
+                    message=message,
+                    verdict=report.verdict,
+                    policy=report.policy,
+                    blocking=blocking,
+                    warnings=warnings,
+                )
+            )
+            if not report.ok:
+                return {
+                    "ok": False,
+                    "running": False,
+                    "refused": True,
+                    "station": self.station,
+                    "now_iso": self.clock.utc_iso(),
+                    "topology_order": self.topology.order(),
+                    "namespaces": self.namespaces.count(),
+                    "pending_stages": report.chain["not_ready"],
+                    "selfcheck": payload,
+                }
             self._running = True
             self.bms.online()
-            ready = {name: True for name in self.topology.order()}
-            topology = self.topology.verify(set(ready))
             self.bus.publish(Event.of("station", "station", "started", severity="notice", unit=self.station))
             return {
+                "ok": True,
                 "running": self._running,
                 "station": self.station,
                 "now_iso": self.clock.utc_iso(),
                 "topology_order": self.topology.order(),
                 "namespaces": self.namespaces.count(),
-                "pending_stages": topology["missing"],
+                "pending_stages": [],
+                "selfcheck": payload,
             }
+
+    def selfcheck_report(self) -> dict:
+        """返回最近一次启动自检报告；本进程没跑过则读落盘副本，供事后复核。"""
+
+        if self._last_selfcheck is not None:
+            return self._last_selfcheck.as_dict()
+        stored = self.store.read("startup_selfcheck")
+        if isinstance(stored, dict):
+            return stored
+        return {
+            "station": self.station,
+            "ok": False,
+            "verdict": "never_run",
+            "policy": "fail_closed",
+            "findings": [],
+            "message": "本平台尚未跑过启动自检",
+        }
 
     def stop(self) -> dict:
         """停运平台。"""
@@ -787,6 +858,7 @@ def build_platform(
     clock: Clock | None = None,
     storage_root: str | None = None,
     rack_count: int = 2,
+    topology: Topology | None = None,
 ) -> Platform:
     """按配置装配平台；``storage_root`` 可覆盖落盘目录。"""
 
@@ -805,4 +877,4 @@ def build_platform(
             balance=resolved.balance,
             quota=resolved.quota,
         )
-    return Platform(config=resolved, clock=clock, rack_count=rack_count)
+    return Platform(config=resolved, clock=clock, rack_count=rack_count, topology=topology)
